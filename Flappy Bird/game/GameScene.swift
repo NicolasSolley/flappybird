@@ -151,11 +151,11 @@ final class GameScene: SKScene {
         var color: UIColor {
             switch self {
             case .shield:
-                return UIColor(red: 0.2, green: 0.7, blue: 1.0)
+                return UIColor(red: 0.2, green: 0.7, blue: 1.0, alpha: 1.0)
             case .slowMotion:
-                return UIColor(red: 0.65, green: 0.4, blue: 1.0)
+                return UIColor(red: 0.65, green: 0.4, blue: 1.0, alpha: 1.0)
             case .doublePoints:
-                return UIColor(red: 1.0, green: 0.85, blue: 0.2)
+                return UIColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1.0)
             }
         }
 
@@ -388,7 +388,7 @@ final class GameScene: SKScene {
     private lazy var comboLabelNode = SKLabelNode(
         fontNamed: "04b_19"
     ).then {
-        $0.fontColor = UIColor(red: 1.0, green: 0.85, blue: 0.2)
+        $0.fontColor = UIColor(red: 1.0, green: 0.85, blue: 0.2, alpha: 1.0)
         $0.fontSize = 24
         $0.position = CGPoint(
             x: width / 2,
@@ -1823,7 +1823,8 @@ final class GameScene: SKScene {
             let gold = UIColor(
                 red: 1.0,
                 green: 0.85,
-                blue: 0.2
+                blue: 0.2,
+                alpha: 1.0
             )
 
             pipeDown.color = gold
@@ -2046,7 +2047,8 @@ final class GameScene: SKScene {
         emitter.particleColor = UIColor(
             red: 1.0,
             green: 0.85,
-            blue: 0.3
+            blue: 0.3,
+            alpha: 1.0
         )
         emitter.particleAlpha = 0.9
         emitter.particleAlphaSpeed = -1.0
@@ -2107,7 +2109,8 @@ final class GameScene: SKScene {
             color = UIColor(
                 red: 1.0,
                 green: 0.45,
-                blue: 0.1
+                blue: 0.1,
+                alpha: 1.0
             )
             alpha = 0.22
         case 20..<30:
@@ -2115,7 +2118,8 @@ final class GameScene: SKScene {
             color = UIColor(
                 red: 0.45,
                 green: 0.2,
-                blue: 0.55
+                blue: 0.55,
+                alpha: 1.0
             )
             alpha = 0.3
         default:
@@ -2123,7 +2127,8 @@ final class GameScene: SKScene {
             color = UIColor(
                 red: 0.05,
                 green: 0.1,
-                blue: 0.3
+                blue: 0.3,
+                alpha: 1.0
             )
             alpha = 0.45
         }
@@ -2165,7 +2170,8 @@ final class GameScene: SKScene {
             $0.fontColor = UIColor(
                 red: 1.0,
                 green: 0.85,
-                blue: 0.2
+                blue: 0.2,
+                alpha: 1.0
             )
             $0.position = CGPoint(
                 x: bird.position.x + 40,
@@ -2177,16 +2183,16 @@ final class GameScene: SKScene {
         addChild(label)
 
         label.run(
-            .sequence([
-                .moveBy(x: 0, y: 40, duration: 0.8),
-                .removeFromParent()
+            SKAction.sequence([
+                SKAction.moveBy(x: 0, y: 40, duration: 0.8),
+                SKAction.removeFromParent()
             ])
         )
 
         label.run(
-            .sequence([
-                .wait(forDuration: 0.4),
-                .fadeOut(withDuration: 0.4)
+            SKAction.sequence([
+                SKAction.wait(forDuration: 0.4),
+                SKAction.fadeOut(withDuration: 0.4)
             ])
         )
     }

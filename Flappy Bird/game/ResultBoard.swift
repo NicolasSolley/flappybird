@@ -88,7 +88,8 @@ public class ResultBoard: SKSpriteNode {
         $0.fontColor = UIColor(
             red: 1.0,
             green: 0.85,
-            blue: 0.2
+            blue: 0.2,
+            alpha: 1.0
         )
         $0.position = CGPoint(x: frame.midX, y: frame.midY + 78)
         $0.zPosition = GamezPosition.resultText + 1
@@ -189,7 +190,8 @@ public class ResultBoard: SKSpriteNode {
                     medalTint = UIColor(
                         red: 0.55,
                         green: 0.85,
-                        blue: 1.0
+                        blue: 1.0,
+                        alpha: 1.0
                     )
                     medalBlend = 0.85
                 case 40...:
