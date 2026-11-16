@@ -39,6 +39,7 @@ struct PhysicsCategory {
     static let land: UInt32 = 1 << 1
     static let pipe: UInt32 = 1 << 2
     static let score: UInt32 = 1 << 3
+    static let powerUp: UInt32 = 1 << 4
 }
 
 // Keep the original name available if other project files use it.
@@ -91,6 +92,27 @@ final class GameScene: SKScene {
         static let gravity = CGVector(dx: 0, dy: -12)
 
         static let verticalPipeGap: CGFloat = 130
+        static let minimumPipeGap: CGFloat = 96
+        static let pipeGapShrinkPerPoint: CGFloat = 2
+
+        // Moving pipes kick in after the first few so the
+        // early game stays classic.
+        static let movingPipesStartScore = 5
+        static let pipeOscillationAmplitude: CGFloat = 40
+        static let pipeOscillationDuration: TimeInterval = 1.6
+
+        static let goldenPipeChance: Float = 0.12
+        static let goldenPipeMinScore = 3
+        static let goldenPipePoints = 5
+
+        static let powerUpSpawnChance: Float = 0.30
+        static let powerUpMinScore = 2
+        static let slowMotionDuration: TimeInterval = 5
+        static let doublePointsDuration: TimeInterval = 10
+        static let shieldInvulnerabilityDuration: TimeInterval = 1.5
+
+        static let comboPointsPerMultiplier = 5
+        static let maxComboMultiplier = 5
         static let pipeScale: CGFloat = 2
         static let birdScale: CGFloat = 1.25
 
@@ -119,6 +141,41 @@ final class GameScene: SKScene {
         static let resultDelay: TimeInterval = 0.2
     }
     
+    // MARK: Power-Ups
+
+    private enum PowerUpKind: String, CaseIterable {
+        case shield
+        case slowMotion
+        case doublePoints
+
+        var color: UIColor {
+            switch self {
+            case .shield:
+                return UIColor(red: 0.2, green: 0.7, blue: 1.0)
+            case .slowMotion:
+                return UIColor(red: 0.65, green: 0.4, blue: 1.0)
+            case .doublePoints:
+                return UIColor(red: 1.0, green: 0.85, blue: 0.2)
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .shield: return "SHIELD"
+            case .slowMotion: return "SLOW"
+            case .doublePoints: return "2X"
+            }
+        }
+
+        var banner: String {
+            switch self {
+            case .shield: return "SHIELD!"
+            case .slowMotion: return "SLOW-MO!"
+            case .doublePoints: return "2X POINTS!"
+            }
+        }
+    }
+
     private struct SeededRandomNumberGenerator {
         private var state: UInt64
 
@@ -192,6 +249,19 @@ final class GameScene: SKScene {
     private var isShowingGameOver = false
 
     private var playFlapSound = false
+
+    // MARK: Modern Features State
+
+    private var pipesCleared = 0
+    private var comboMultiplier = 1
+    private var hasShield = false
+    private var isInvulnerable = false
+    private var isSlowMotionActive = false
+    private var isDoublePointsActive = false
+    private var slowMotionTimer: Timer?
+    private var doublePointsTimer: Timer?
+    private var dayNightStage = 0
+    private var birdTrailEmitter: SKEmitterNode?
 
     private var playSounds = true
     private var newBirds = true
@@ -315,6 +385,60 @@ final class GameScene: SKScene {
         $0.zPosition = GameZPosition.score
     }
 
+    private lazy var comboLabelNode = SKLabelNode(
+        fontNamed: "04b_19"
+    ).then {
+        $0.fontColor = UIColor(red: 1.0, green: 0.85, blue: 0.2)
+        $0.fontSize = 24
+        $0.position = CGPoint(
+            x: width / 2,
+            y: 3 * height / 4 - 60
+        )
+        $0.zPosition = GameZPosition.score + 1
+        $0.alpha = 0
+    }
+
+    private lazy var effectLabelNode = SKLabelNode(
+        fontNamed: "04b_19"
+    ).then {
+        $0.fontColor = .white
+        $0.fontSize = 16
+        $0.position = CGPoint(
+            x: width / 2,
+            y: 3 * height / 4 - 92
+        )
+        $0.zPosition = GameZPosition.score + 1
+        $0.alpha = 0
+    }
+
+    private lazy var countdownLabelNode = SKLabelNode(
+        fontNamed: "04b_19"
+    ).then {
+        $0.fontColor = .white
+        $0.fontSize = 72
+        $0.position = CGPoint(
+            x: width / 2,
+            y: height / 2
+        )
+        $0.zPosition = GameZPosition.resultText + 5
+    }
+
+    // Tints only the sky: it sits above the sky sprites (-3)
+    // and below the pipes (-2), so the world itself stays bright.
+    private lazy var dayNightOverlay = SKShapeNode(
+        rect: CGRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: height
+        )
+    ).then {
+        $0.fillColor = .clear
+        $0.strokeColor = .clear
+        $0.alpha = 0
+        $0.zPosition = -2.5
+    }
+
     // MARK: Static Buttons
 
     private static var settingsButton =
@@ -389,6 +513,7 @@ final class GameScene: SKScene {
         moving.addChild(pipes)
 
         addChild(bird)
+        addChild(dayNightOverlay)
         addChild(ground)
 
         addChild(Self.githubButton)
@@ -415,6 +540,14 @@ final class GameScene: SKScene {
         updateSky()
         updateBirdTextures()
         startPipeSpawner()
+        setupBirdTrail()
+    }
+
+    private func setupBirdTrail() {
+        let trail = makeTrailEmitter()
+        bird.addChild(trail)
+        trail.targetNode = self
+        birdTrailEmitter = trail
     }
 
     // MARK: Settings
@@ -518,7 +651,8 @@ final class GameScene: SKScene {
                     PhysicsCategory.pipe
                 $0.contactTestBitMask =
                     PhysicsCategory.land |
-                    PhysicsCategory.pipe
+                    PhysicsCategory.pipe |
+                    PhysicsCategory.powerUp
             }
         }
     }
@@ -924,6 +1058,13 @@ final class GameScene: SKScene {
     }
 
     private func handleGameTap() {
+        // Taps do nothing while paused (including during the
+        // resume countdown) — otherwise a tap would queue a
+        // flap that fires the moment the game resumes.
+        guard !isPausedByUser else {
+            return
+        }
+
         if isWaitingToStart {
             startGame()
             return
@@ -1058,9 +1199,6 @@ final class GameScene: SKScene {
             return
         }
 
-        isPaused = false
-        isPausedByUser = false
-
         playSound(swooshSound)
 
         if haptics {
@@ -1069,6 +1207,61 @@ final class GameScene: SKScene {
 
         resumeButton.removeAllActions()
         resumeButton.removeFromParent()
+
+        startResumeCountdown()
+    }
+
+    // The scene stays paused for the countdown — the numbers
+    // tick on a DispatchQueue timer because SKActions do not
+    // advance while the scene is paused.
+    private func startResumeCountdown() {
+        countdownLabelNode.text = "3"
+        countdownLabelNode.setScale(0)
+        addChild(countdownLabelNode)
+
+        countdownLabelNode.run(
+            .scale(to: 1, duration: 0.15)
+        )
+
+        let numbers = ["3", "2", "1"]
+
+        for (index, number) in numbers.enumerated() {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Double(index) * 0.6
+            ) { [weak self] in
+                guard let self, self.isPausedByUser else {
+                    return
+                }
+
+                self.countdownLabelNode.text = number
+                self.countdownLabelNode.setScale(1.25)
+
+                self.countdownLabelNode.run(
+                    .scale(to: 1.0, duration: 0.15)
+                )
+
+                if self.haptics {
+                    self.impactFeedback.impactOccurred()
+                }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 1.8
+        ) { [weak self] in
+            guard let self, self.isPausedByUser else {
+                return
+            }
+
+            self.finishResume()
+        }
+    }
+
+    private func finishResume() {
+        countdownLabelNode.removeFromParent()
+
+        isPaused = false
+        isPausedByUser = false
 
         pauseOverlay.run(
             .sequence([
@@ -1124,6 +1317,8 @@ final class GameScene: SKScene {
         addChild(getReady)
         addChild(scoreLabelNode)
         addChild(scoreLabelNodeInside)
+        addChild(comboLabelNode)
+        addChild(effectLabelNode)
 
         bird.position = CGPoint(
             x: width / 2.5,
@@ -1602,12 +1797,17 @@ final class GameScene: SKScene {
             )
         )
 
+        let gap = currentPipeGap()
+
+        let isGolden =
+            score >= Constants.goldenPipeMinScore &&
+            Float.random(in: 0..<1) < Constants.goldenPipeChance
+
         let pipeDown = makePipe(
             texture: pipeTextureDown,
             position: CGPoint(
                 x: 0,
-                y: y + pipeTextureDown.height * 2 +
-                    Constants.verticalPipeGap
+                y: y + pipeTextureDown.height * 2 + gap
             )
         )
 
@@ -1619,7 +1819,84 @@ final class GameScene: SKScene {
             )
         )
 
-        let scoreNode = makeScoreNode()
+        if isGolden {
+            let gold = UIColor(
+                red: 1.0,
+                green: 0.85,
+                blue: 0.2
+            )
+
+            pipeDown.color = gold
+            pipeDown.colorBlendFactor = 0.65
+            pipeUp.color = gold
+            pipeUp.colorBlendFactor = 0.65
+        }
+
+        // The pair oscillates as one unit so the gap stays
+        // intact; the score sensor stays in the group and
+        // does not move, so scoring is unaffected.
+        let pipePair = SKNode()
+        pipePair.addChild(pipeDown)
+        pipePair.addChild(pipeUp)
+
+        if isGolden {
+            let sparkle = makeGoldenSparkle()
+            sparkle.position = CGPoint(
+                x: 0,
+                y: y + pipeTextureUp.height + gap / 2
+            )
+            pipePair.addChild(sparkle)
+        }
+
+        if score >= Constants.movingPipesStartScore {
+            let legDuration =
+                Constants.pipeOscillationDuration / 4
+            let amplitude =
+                Constants.pipeOscillationAmplitude
+
+            let oscillate = SKAction.repeatForever(
+                .sequence([
+                    .moveBy(
+                        x: 0,
+                        y: amplitude,
+                        duration: legDuration
+                    ),
+                    .moveBy(
+                        x: 0,
+                        y: -amplitude,
+                        duration: legDuration
+                    ),
+                    .moveBy(
+                        x: 0,
+                        y: -amplitude,
+                        duration: legDuration
+                    ),
+                    .moveBy(
+                        x: 0,
+                        y: amplitude,
+                        duration: legDuration
+                    )
+                ])
+            )
+
+            // Random phase so pipes do not all bob in sync.
+            let randomDelay = TimeInterval.random(
+                in: 0...Constants.pipeOscillationDuration
+            )
+
+            pipePair.run(
+                .sequence([
+                    .wait(forDuration: randomDelay),
+                    oscillate
+                ])
+            )
+        }
+
+        let scoreNode = makeScoreNode(
+            points: isGolden
+                ? Constants.goldenPipePoints
+                : 1
+        )
 
         let distance =
             width +
@@ -1640,8 +1917,7 @@ final class GameScene: SKScene {
 
             $0.zPosition = GameZPosition.pipe
 
-            $0.addChild(pipeDown)
-            $0.addChild(pipeUp)
+            $0.addChild(pipePair)
             $0.addChild(scoreNode)
 
             $0.run(
@@ -1653,6 +1929,18 @@ final class GameScene: SKScene {
         }
 
         pipes.addChild(pipeGroup)
+
+        maybeSpawnPowerUp()
+    }
+
+    // The gap tightens 2pt per point scored, down to a
+    // 96pt floor so it stays fair.
+    private func currentPipeGap() -> CGFloat {
+        max(
+            Constants.minimumPipeGap,
+            Constants.verticalPipeGap -
+                CGFloat(score) * Constants.pipeGapShrinkPerPoint
+        )
     }
 
     private func makePipe(
@@ -1673,7 +1961,7 @@ final class GameScene: SKScene {
         }
     }
 
-    private func makeScoreNode() -> SKNode {
+    private func makeScoreNode(points: Int = 1) -> SKNode {
         SKNode().then {
             // Place the scoring sensor just beyond the right edge
             // of the pipe. The bird must fully clear the pipe
@@ -1681,6 +1969,10 @@ final class GameScene: SKScene {
             $0.position = CGPoint(
                 x: pipeTextureDown.width + bird.width / 2 + 2,
                 y: height / 2 + 400
+            )
+
+            $0.userData = NSMutableDictionary(
+                dictionary: ["points": points]
             )
 
             $0.physicsBody = SKPhysicsBody(
@@ -1697,6 +1989,490 @@ final class GameScene: SKScene {
         }
     }
 
+    // MARK: Modern Features — Particles
+
+    // Code-generated soft dot, so effects need no new art.
+    private static func softDotTexture(
+        size: CGFloat = 16
+    ) -> SKTexture {
+        let renderer = UIGraphicsImageRenderer(
+            size: CGSize(width: size, height: size)
+        )
+
+        let image = renderer.image { context in
+            context.cgContext.setFillColor(
+                UIColor.white.cgColor
+            )
+            context.cgContext.fillEllipse(
+                in: CGRect(
+                    x: 0,
+                    y: 0,
+                    width: size,
+                    height: size
+                )
+            )
+        }
+
+        return SKTexture(image: image)
+    }
+
+    private func makeTrailEmitter() -> SKEmitterNode {
+        let emitter = SKEmitterNode()
+        emitter.particleTexture = Self.softDotTexture()
+        emitter.particleBirthRate = 28
+        emitter.particleLifetime = 0.35
+        emitter.particleLifetimeRange = 0.12
+        emitter.particlePositionRange = CGVector(dx: 3, dy: 3)
+        emitter.particleSpeed = 0
+        emitter.particleScale = 0.4
+        emitter.particleScaleSpeed = -0.8
+        emitter.particleColor = .white
+        emitter.particleAlpha = 0.55
+        emitter.particleAlphaSpeed = -1.4
+        emitter.zPosition = -0.5
+        return emitter
+    }
+
+    private func makeGoldenSparkle() -> SKEmitterNode {
+        let emitter = SKEmitterNode()
+        emitter.particleTexture = Self.softDotTexture()
+        emitter.particleBirthRate = 8
+        emitter.particleLifetime = 0.7
+        emitter.particleLifetimeRange = 0.3
+        emitter.particlePositionRange = CGVector(dx: 30, dy: 40)
+        emitter.particleSpeed = 8
+        emitter.particleScale = 0.45
+        emitter.particleScaleSpeed = -0.4
+        emitter.particleColor = UIColor(
+            red: 1.0,
+            green: 0.85,
+            blue: 0.3
+        )
+        emitter.particleAlpha = 0.9
+        emitter.particleAlphaSpeed = -1.0
+        emitter.zPosition = 0.5
+        return emitter
+    }
+
+    private func featherBurst() {
+        let burst = SKEmitterNode()
+        burst.particleTexture = Self.softDotTexture()
+        burst.numParticlesToEmit = 40
+        burst.particleBirthRate = 400
+        burst.particleLifetime = 0.9
+        burst.particleLifetimeRange = 0.3
+        burst.emissionAngleRange = .pi * 2
+        burst.particleSpeed = 140
+        burst.particleSpeedRange = 80
+        burst.particleScale = 0.6
+        burst.particleScaleSpeed = -0.6
+        burst.particleColorSequence = SKKeyframeSequence(
+            keyframeValues: [
+                UIColor.yellow,
+                UIColor.white,
+                UIColor.orange
+            ],
+            times: [0, 0.5, 1]
+        )
+        burst.particleAlphaSpeed = -1.0
+        burst.position = bird.position
+        burst.zPosition = GameZPosition.score
+
+        addChild(burst)
+
+        burst.run(
+            .sequence([
+                .wait(forDuration: 1.5),
+                .removeFromParent()
+            ])
+        )
+    }
+
+    // MARK: Modern Features — Day / Night Cycle
+
+    // Day for the first 10, sunset 10–19, dusk 20–29,
+    // night from 30 on. The overlay tints only the sky.
+    private func updateDayNight() {
+        let stage: Int
+        let color: UIColor
+        let alpha: CGFloat
+
+        switch score {
+        case 0..<10:
+            stage = 0
+            color = .clear
+            alpha = 0
+        case 10..<20:
+            stage = 1
+            color = UIColor(
+                red: 1.0,
+                green: 0.45,
+                blue: 0.1
+            )
+            alpha = 0.22
+        case 20..<30:
+            stage = 2
+            color = UIColor(
+                red: 0.45,
+                green: 0.2,
+                blue: 0.55
+            )
+            alpha = 0.3
+        default:
+            stage = 3
+            color = UIColor(
+                red: 0.05,
+                green: 0.1,
+                blue: 0.3
+            )
+            alpha = 0.45
+        }
+
+        guard stage != dayNightStage else {
+            return
+        }
+
+        dayNightStage = stage
+        dayNightOverlay.fillColor = color
+
+        dayNightOverlay.run(
+            .fadeAlpha(to: alpha, duration: 0.8)
+        )
+    }
+
+    // MARK: Modern Features — Combo Streak
+
+    private func updateComboMultiplier() {
+        comboMultiplier = min(
+            Constants.maxComboMultiplier,
+            1 + pipesCleared / Constants.comboPointsPerMultiplier
+        )
+
+        if comboMultiplier > 1 {
+            comboLabelNode.text = "COMBO x\(comboMultiplier)"
+            comboLabelNode.alpha = 1
+        } else {
+            comboLabelNode.alpha = 0
+        }
+    }
+
+    // MARK: Modern Features — Floating Labels
+
+    private func showFloatingPoints(_ text: String) {
+        let label = SKLabelNode(fontNamed: "04b_19").then {
+            $0.text = text
+            $0.fontSize = 28
+            $0.fontColor = UIColor(
+                red: 1.0,
+                green: 0.85,
+                blue: 0.2
+            )
+            $0.position = CGPoint(
+                x: bird.position.x + 40,
+                y: bird.position.y + 30
+            )
+            $0.zPosition = GameZPosition.score + 1
+        }
+
+        addChild(label)
+
+        label.run(
+            .sequence([
+                .moveBy(x: 0, y: 40, duration: 0.8),
+                .removeFromParent()
+            ])
+        )
+
+        label.run(
+            .sequence([
+                .wait(forDuration: 0.4),
+                .fadeOut(withDuration: 0.4)
+            ])
+        )
+    }
+
+    private func showEffectBanner(_ text: String) {
+        let banner = SKLabelNode(fontNamed: "04b_19").then {
+            $0.text = text
+            $0.fontSize = 32
+            $0.fontColor = .white
+            $0.position = CGPoint(
+                x: width / 2,
+                y: height / 2 + 60
+            )
+            $0.zPosition = GameZPosition.score + 1
+            $0.setScale(0)
+        }
+
+        addChild(banner)
+
+        banner.run(
+            .sequence([
+                .scale(to: 1.1, duration: 0.15),
+                .scale(to: 1.0, duration: 0.1),
+                .wait(forDuration: 0.7),
+                .fadeOut(withDuration: 0.3),
+                .removeFromParent()
+            ])
+        )
+    }
+
+    private func updateEffectLabel() {
+        var parts: [String] = []
+
+        if hasShield {
+            parts.append("SHIELD")
+        }
+
+        if isSlowMotionActive {
+            parts.append("SLOW")
+        }
+
+        if isDoublePointsActive {
+            parts.append("2X")
+        }
+
+        effectLabelNode.text = parts.joined(separator: "  ")
+        effectLabelNode.alpha = parts.isEmpty ? 0 : 1
+    }
+
+    // MARK: Modern Features — Power-Ups
+
+    private func maybeSpawnPowerUp() {
+        guard !isWaitingToStart,
+              !isGameOver,
+              score >= Constants.powerUpMinScore,
+              Float.random(in: 0..<1) <
+                Constants.powerUpSpawnChance,
+              !hasPowerUpOnScreen() else {
+            return
+        }
+
+        spawnPowerUp()
+    }
+
+    private func hasPowerUpOnScreen() -> Bool {
+        var found = false
+
+        pipes.enumerateChildNodes(
+            withName: "powerupGroup"
+        ) { _, stop in
+            found = true
+            stop.pointee = true
+        }
+
+        return found
+    }
+
+    private func spawnPowerUp() {
+        guard let kind = PowerUpKind.allCases.randomElement()
+        else {
+            return
+        }
+
+        let y = CGFloat.random(
+            in: height * 0.35...height * 0.65
+        )
+
+        let orb = SKShapeNode(circleOfRadius: 18).then {
+            $0.fillColor = kind.color
+            $0.strokeColor = .white
+            $0.lineWidth = 2
+            $0.name = "powerup"
+            $0.zPosition = GameZPosition.bird
+
+            $0.userData = NSMutableDictionary(
+                dictionary: ["kind": kind.rawValue]
+            )
+
+            $0.physicsBody = SKPhysicsBody(
+                circleOfRadius: 22
+            ).then {
+                $0.isDynamic = false
+                $0.categoryBitMask = PhysicsCategory.powerUp
+                $0.contactTestBitMask = PhysicsCategory.bird
+                $0.collisionBitMask = 0
+            }
+        }
+
+        let label = SKLabelNode(fontNamed: "04b_19").then {
+            $0.text = kind.label
+            $0.fontSize = 12
+            $0.fontColor = .white
+            $0.position = CGPoint(x: 0, y: -26)
+        }
+
+        orb.addChild(label)
+
+        orb.run(
+            .repeatForever(
+                .sequence([
+                    .scale(to: 1.15, duration: 0.4),
+                    .scale(to: 1.0, duration: 0.4)
+                ])
+            )
+        )
+
+        let distance = width + 300
+
+        let group = SKNode().then {
+            $0.name = "powerupGroup"
+            $0.position = CGPoint(x: width + 120, y: y)
+            $0.addChild(orb)
+
+            $0.run(
+                .sequence([
+                    .moveBy(
+                        x: -distance,
+                        y: 0,
+                        duration:
+                            Constants.pipeMoveSpeed * distance
+                    ),
+                    .removeFromParent()
+                ])
+            )
+        }
+
+        pipes.addChild(group)
+    }
+
+    private func handlePowerUpContact(
+        _ contact: SKPhysicsContact
+    ) {
+        guard let kind = powerUpKind(from: contact) else {
+            return
+        }
+
+        for body in [contact.bodyA, contact.bodyB] {
+            if body.categoryBitMask == PhysicsCategory.powerUp {
+                body.node?.parent?.removeFromParent()
+            }
+        }
+
+        collectPowerUp(kind)
+    }
+
+    private func powerUpKind(
+        from contact: SKPhysicsContact
+    ) -> PowerUpKind? {
+        for body in [contact.bodyA, contact.bodyB] {
+            if body.categoryBitMask == PhysicsCategory.powerUp,
+               let raw = body.node?.userData?["kind"] as? String {
+                return PowerUpKind(rawValue: raw)
+            }
+        }
+
+        return nil
+    }
+
+    private func collectPowerUp(_ kind: PowerUpKind) {
+        if haptics {
+            impactFeedback.impactOccurred()
+        }
+
+        playSound(pointSound)
+        showEffectBanner(kind.banner)
+
+        switch kind {
+        case .shield:
+            hasShield = true
+            updateEffectLabel()
+        case .slowMotion:
+            activateSlowMotion()
+        case .doublePoints:
+            activateDoublePoints()
+        }
+    }
+
+    private func activateSlowMotion() {
+        // Scene speed slows every action (including the pipe
+        // spawner) and physicsWorld.speed slows gravity and
+        // impulses, so the whole world slows uniformly.
+        // moving.speed is left alone — it multiplies with
+        // the scene speed and would double-slow the world.
+        isSlowMotionActive = true
+        speed = 0.5
+        physicsWorld.speed = 0.5
+        updateEffectLabel()
+
+        slowMotionTimer?.invalidate()
+        slowMotionTimer = Timer.scheduledTimer(
+            withTimeInterval: Constants.slowMotionDuration,
+            repeats: false
+        ) { [weak self] _ in
+            self?.endSlowMotion()
+        }
+    }
+
+    private func endSlowMotion() {
+        slowMotionTimer?.invalidate()
+        slowMotionTimer = nil
+
+        guard isSlowMotionActive else {
+            return
+        }
+
+        isSlowMotionActive = false
+        speed = 1
+        physicsWorld.speed = 1
+        updateEffectLabel()
+    }
+
+    private func activateDoublePoints() {
+        isDoublePointsActive = true
+        updateEffectLabel()
+
+        doublePointsTimer?.invalidate()
+        doublePointsTimer = Timer.scheduledTimer(
+            withTimeInterval: Constants.doublePointsDuration,
+            repeats: false
+        ) { [weak self] _ in
+            self?.endDoublePoints()
+        }
+    }
+
+    private func endDoublePoints() {
+        doublePointsTimer?.invalidate()
+        doublePointsTimer = nil
+
+        guard isDoublePointsActive else {
+            return
+        }
+
+        isDoublePointsActive = false
+        updateEffectLabel()
+    }
+
+    private func consumeShield() {
+        hasShield = false
+        isInvulnerable = true
+        showEffectBanner("SHIELD SAVED YOU!")
+        updateEffectLabel()
+
+        // One blink cycle is 0.2s; repeat enough cycles to
+        // cover the invulnerability window.
+        let blinkCount = Int(
+            Constants.shieldInvulnerabilityDuration / 0.2
+        )
+
+        let blink = SKAction.repeat(
+            .sequence([
+                .fadeAlpha(to: 0.3, duration: 0.1),
+                .fadeAlpha(to: 1.0, duration: 0.1)
+            ]),
+            count: blinkCount
+        )
+
+        bird.run(
+            .sequence([
+                blink,
+                .run { [weak self] in
+                    self?.isInvulnerable = false
+                }
+            ])
+        )
+    }
+
     // MARK: Game Over
 
     private func gameOver() {
@@ -1710,6 +2486,11 @@ final class GameScene: SKScene {
 
         isPausedByUser = false
         isPaused = false
+
+        endSlowMotion()
+        endDoublePoints()
+        birdTrailEmitter?.particleBirthRate = 0
+        featherBurst()
 
         timeTook =
             CFAbsoluteTimeGetCurrent() - gameStartTime
@@ -1756,6 +2537,8 @@ final class GameScene: SKScene {
                 .run { [weak self] in
                     self?.scoreLabelNode.removeFromParent()
                     self?.scoreLabelNodeInside.removeFromParent()
+                    self?.comboLabelNode.removeFromParent()
+                    self?.effectLabelNode.removeFromParent()
                 },
                 .run { [weak self] in
                     guard let self else { return }
@@ -1835,7 +2618,24 @@ final class GameScene: SKScene {
         pauseButton.removeFromParent()
         resumeButton.removeFromParent()
         pauseOverlay.removeFromParent()
-        
+        countdownLabelNode.removeFromParent()
+
+        endSlowMotion()
+        endDoublePoints()
+
+        pipesCleared = 0
+        comboMultiplier = 1
+        hasShield = false
+        isInvulnerable = false
+        dayNightStage = 0
+        dayNightOverlay.alpha = 0
+        comboLabelNode.alpha = 0
+        effectLabelNode.alpha = 0
+        birdTrailEmitter?.particleBirthRate = 28
+
+        speed = 1
+        physicsWorld.speed = 1
+
         pipes.removeAllChildren()
 
         resultNode.removeFromParent()
@@ -1847,6 +2647,8 @@ final class GameScene: SKScene {
         addChild(getReady)
         addChild(scoreLabelNode)
         addChild(scoreLabelNodeInside)
+        addChild(comboLabelNode)
+        addChild(effectLabelNode)
 
         scoreLabelNode.setScale(1)
         scoreLabelNodeInside.setScale(1)
@@ -1896,10 +2698,38 @@ final class GameScene: SKScene {
             bodyB & category == category
     }
 
-    private func handleScore() {
-        score += 1
+    // Golden pipes carry their point value in the score
+    // sensor's userData; ordinary pipes are worth 1.
+    private func scorePoints(
+        from contact: SKPhysicsContact
+    ) -> Int {
+        for body in [contact.bodyA, contact.bodyB] {
+            if body.categoryBitMask == PhysicsCategory.score,
+               let points = body.node?.userData?["points"] as? Int {
+                return points
+            }
+        }
 
-        if score == Constants.superScore {
+        return 1
+    }
+
+    private func handleScore(points: Int = 1) {
+        pipesCleared += 1
+        updateComboMultiplier()
+
+        let awarded =
+            points * comboMultiplier *
+            (isDoublePointsActive ? 2 : 1)
+
+        let previousScore = score
+        score += awarded
+
+        if points > 1 {
+            showFloatingPoints("+\(awarded)")
+        }
+
+        if score >= Constants.superScore &&
+            previousScore < Constants.superScore {
             enableSuperBird()
         }
 
@@ -1908,6 +2738,7 @@ final class GameScene: SKScene {
         }
 
         playSound(pointSound)
+        updateDayNight()
 
         scaleTwice(
             node: scoreLabelNode,
@@ -1991,7 +2822,9 @@ extension GameScene: SKPhysicsContactDelegate {
                 contact,
                 with: PhysicsCategory.score
             ) {
-                handleScore()
+                handleScore(
+                    points: scorePoints(from: contact)
+                )
                 return
             }
         }
@@ -1999,8 +2832,22 @@ extension GameScene: SKPhysicsContactDelegate {
         if !isShowingGameOver &&
             isContact(
                 contact,
+                with: PhysicsCategory.powerUp
+            ) {
+            handlePowerUpContact(contact)
+            return
+        }
+
+        if !isShowingGameOver &&
+            isContact(
+                contact,
                 with: PhysicsCategory.pipe
             ) {
+            if hasShield && !isInvulnerable {
+                consumeShield()
+                return
+            }
+
             handlePipeCollision()
             return
         }

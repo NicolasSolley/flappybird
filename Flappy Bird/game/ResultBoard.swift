@@ -32,6 +32,7 @@ public class ResultBoard: SKSpriteNode {
         addChild(new)
         new.setScale(0)
         addChild(sparkle)
+        addChild(newBestLabel)
         addChild(currentScore)
         addChild(bestScore)
         addChild(currentScoreInside)
@@ -78,6 +79,21 @@ public class ResultBoard: SKSpriteNode {
         $0.position = CGPoint(x: frame.midX + 35, y: frame.midY - 6)
         $0.setScale(0)
     }
+
+    private lazy var newBestLabel = SKLabelNode(
+        fontNamed: "04b_19"
+    ).then {
+        $0.text = "NEW BEST!"
+        $0.fontSize = 15
+        $0.fontColor = UIColor(
+            red: 1.0,
+            green: 0.85,
+            blue: 0.2
+        )
+        $0.position = CGPoint(x: frame.midX, y: frame.midY + 78)
+        $0.zPosition = GamezPosition.resultText + 1
+        $0.alpha = 0
+    }
     
     private lazy var sparkle = SKSpriteNode(texture: Assets.shared.sprites.textureNamed("sparkle")).then {
         $0.setScale(0)
@@ -107,6 +123,30 @@ public class ResultBoard: SKSpriteNode {
                     if(self.score > ResultBoard.bestScore()){
                         ResultBoard.setBestScore(self.score)
                     }
+
+                    let isNewBest =
+                        self.score > 0 &&
+                        self.score > previousHighScore
+
+                    if isNewBest {
+                        DispatchQueue.main.async {
+                            self.newBestLabel.alpha = 1
+                            self.newBestLabel.run(
+                                SKAction.repeatForever(
+                                    SKAction.sequence([
+                                        SKAction.scale(
+                                            to: 1.15,
+                                            duration: 0.3
+                                        ),
+                                        SKAction.scale(
+                                            to: 1.0,
+                                            duration: 0.3
+                                        )
+                                    ])
+                                )
+                            )
+                        }
+                    }
                     
                     self.currentScore.text = "0"
                     self.currentScoreInside.text = "0"
@@ -133,8 +173,47 @@ public class ResultBoard: SKSpriteNode {
             }
             
             if canShowScore {
-                let medalTexture = score == 0 ? SKTexture() : (score < (ResultBoard.bestScore() / 2) ? (Assets.shared.sprites.textureNamed("copper-medal")) : (score < ResultBoard.bestScore() ?(SKTexture(imageNamed: "silver-medal")) : (score < (ResultBoard.bestScore() * 2) ? (Assets.shared.sprites.textureNamed("gold-medal")) : (Assets.shared.sprites.textureNamed("platinum-medal")))))
-                medal.run(SKAction.setTexture(medalTexture, resize: true))
+                // Absolute thresholds, like the original game:
+                // copper 10, silver 20, gold 30, platinum 40,
+                // diamond 50. There is no diamond texture in
+                // the atlas, so diamond is the platinum medal
+                // tinted ice-blue — code only, no new art.
+                let medalTexture: SKTexture
+                var medalTint: UIColor = .clear
+                var medalBlend: CGFloat = 0
+
+                switch score {
+                case 50...:
+                    medalTexture = Assets.shared.sprites
+                        .textureNamed("platinum-medal")
+                    medalTint = UIColor(
+                        red: 0.55,
+                        green: 0.85,
+                        blue: 1.0
+                    )
+                    medalBlend = 0.85
+                case 40...:
+                    medalTexture = Assets.shared.sprites
+                        .textureNamed("platinum-medal")
+                case 30...:
+                    medalTexture = Assets.shared.sprites
+                        .textureNamed("gold-medal")
+                case 20...:
+                    medalTexture = SKTexture(
+                        imageNamed: "silver-medal"
+                    )
+                case 10...:
+                    medalTexture = Assets.shared.sprites
+                        .textureNamed("copper-medal")
+                default:
+                    medalTexture = SKTexture()
+                }
+
+                medal.run(
+                    SKAction.setTexture(medalTexture, resize: true)
+                )
+                medal.color = medalTint
+                medal.colorBlendFactor = medalBlend
                 
                 sparkle.setScale(0)
                 sparkle.removeAllActions()
